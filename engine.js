@@ -453,125 +453,45 @@ async function fetchSpecFromOpenAI(reference) {
   const model = process.env.WORLD_ENGINE_MODEL || 'gpt-5-mini';
   const allowedChars = readWhitelistChars();
 
-  const system = `
-You are generating a SAFE, STRICT JSON SPEC for a deterministic world engine.
-You MUST output a single JSON object only (no markdown, no comments, no extra text).
-
-GOAL
-Given an environment description, produce:
-1) tiles.background and tiles.foreground definitions
-2) layers (optional but recommended)
-3) ops (required) that paint the world and place structures
-
-WORLD CONSTRAINTS (hard requirements)
-- world.width = 200, world.height = 200, world.metersPerCell = 1
-- Output JSON shape:
-{
-  "world": {"width":200,"height":200,"metersPerCell":1},
-  "tiles": {
-    "background": [{"id":"...","name":"...","color":"#RRGGBB","walkable":true}],
-    "foreground": [{"id":"...","name":"...","symbol":"...","color":"#RRGGBB","walkable":true}]
-  },
-  "layers": { "<layerName>": <layerDef>, ... },
-  "ops": [ <opDef>, ... ]
+const promptsPath = path.join(process.cwd(), 'prompts.json');
+let system = '';
+let user = '';
+try {
+    if (fs.existsSync(promptsPath)) {
+        const raw = fs.readFileSync(promptsPath, 'utf8');
+        const p = JSON.parse(raw);
+        // Expected format only: { "system": "...", "user": "..." }
+        if (p && typeof p === 'object') {
+          if (typeof p.system === 'string') system = p.system;
+          if (typeof p.user === 'string') user = p.user;
+        }
+    }
+} catch (e) {
+    // ignore and fall back to empty prompts
 }
+system = String(system || '');
+user = String(user || '');
 
-TILE RULES (hard requirements)
-- background tile fields: id, name, color, walkable
-- foreground tile fields: id, name, symbol, color, walkable
-- id format: lowercase [a-z0-9] plus optional "_" or "-", length 1..16
-- ids MUST be unique within background and within foreground
-- colors MUST be "#RRGGBB"
-- symbol MUST be a short unicode string (1-4 chars)
+ // Ensure compliance with JSON-only response_format requirement
+ // The OpenAI API requires that at least one message mention "json" when using response_format: json_object
+ const defaultSystem = 'You are a generator. Return a JSON object only. Output strictly valid JSON with no extra commentary.';
+ if (!/json/i.test(system) && !/json/i.test(user)) {
+   system = (defaultSystem + (system ? '\n' + system : ''));
+ }
+ // Provide a minimal user prompt if none is supplied
+ const userMsg = (user && user.trim().length)
+   ? user
+   : `Generate a world specification for the reference "${reference}". Respond with a JSON object only.`;
 
-ENGINE CAPABILITIES (ONLY these are allowed)
-LAYER TYPES:
-- {"type":"const","value":0..1}
-- {"type":"valueNoise","seed":"str","scale":0.0005..0.2}
-- {"type":"fbm","seed":"str","scale":0.0005..0.2,"octaves":1..8,"persistence":0.05..0.95}
-- {"type":"radialGradient","cx":0..999,"cy":0..999,"r":1..2000,"invert":true|false}
-- {"type":"shape","shape":<shape>}
-- {"type":"combine","op":"add|sub|mul|min|max|lerp|threshold|smoothstep",
-   "a":{"ref":"layer"}|{"const":0..1},
-   "b":{"ref":"layer"}|{"const":0..1},
-   "t":number|[number,number]
-  }
-
-SHAPES:
-- {"kind":"rect","x":int,"y":int,"w":int,"h":int}
-- {"kind":"roundRect","x":int,"y":int,"w":int,"h":int,"round":0..200}
-- {"kind":"circle","cx":number,"cy":number,"r":number}
-- {"kind":"polygon","points":[[x,y],...]}   (>=3 points)
-- {"kind":"line","a":[x,y],"b":[x,y],"thickness":number}
-
-PREDICATES (for op.where):
-- {"all":[predicate,...]} | {"any":[...]} | {"not":predicate}
-- {"layerGt":["layer",threshold]} | {"layerLt":["layer",threshold]} | {"layerBetween":["layer",a,b]}
-- {"shape":<shape>}
-- {"chance":0..1,"seed":"str"?}
-
-OPS (executed top-to-bottom; ONLY these):
-1) paint:
-   {"type":"paint","where":<predicate>?,
-    "bg":"<bgId>"?, "fg":"<fgId>"|null?}
-
-2) roads.grid (for cities!):
-   {"type":"roads.grid","where":<predicate>?,
-    "origin":[x,y],
-    "spacing":4..80,
-    "thickness":1..8,
-    "bg":"<bgId>",
-    "fgAtIntersections":{"id":"<fgId>","p":0..1,"seed":"str"?}?
-   }
-
-3) stamp.scatter:
-   {"type":"stamp.scatter","seed":"str",
-    "where":<predicate>?,
-    "count":1..200000,
-    "maxAttempts":1..400000,
-    "prefabs":[{"w":1..40,"h":1..40,"bg":"<bgId>"?,"fg":"<fgId>"?,"p":0..1}, ...]
-   }
-
-IMPORTANT STRATEGY (do this)
-- Always include a first op that paints a base background over the whole map (e.g. {"type":"paint","bg":"<some-bg>"}).
-- For structured environments (city/dungeon/facility), DO NOT rely on noise for layout.
-  Use shape masks + roads.grid + stamping to create coherent geometry.
-- For organic environments (forest/desert), use noise layers + paint thresholds + light stamping.
-
-VALIDITY SELF-CHECK (must be true before you answer)
-- ops exists and has at least 1 entry
-- every referenced bg/fg id in ops exists in tiles
-- every referenced layer in predicates exists in layers
-- no unsupported layer/op types appear
-If any would fail, fix it before outputting JSON.
-
-ALLOWED SYMBOLS
-Foreground tile "symbol" MUST be a single character chosen ONLY from this set:
-${allowedChars}
-If a suitable symbol is not available, choose an ASCII fallback such as one of: ^ * o @ # ~ + x
-
-Only use ANSI 16 palette colors for tile "color" values.
-`;
-
-  const user = `Environment description: ${reference}
-
-Design tiles + layers + ops to match the description.
-
-If the environment suggests a CITY or GRID:
-- Create a "city" mask shape layer (roundRect or polygon).
-- Use a roads.grid op within that mask (spacing 16-40, thickness 1-3).
-- Optionally add fgAtIntersections for lamps/signals.
-
-Return only the JSON object.`;
-
-  try {
+ const messages = [
+   { role: 'system', content: system.trim() },
+   { role: 'user', content: userMsg }
+ ];
+try {
     const resp = await client.chat.completions.create({
       model,
       response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: system.trim() },
-        { role: 'user', content: user }
-      ]
+      messages
     });
 
     const text = resp.choices?.[0]?.message?.content?.trim() || '';
