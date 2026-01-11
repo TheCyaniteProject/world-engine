@@ -1,0 +1,21 @@
+{
+  "name": "world-engine",
+  "version": "1.0.0",
+  "description": "LLM-driven game mechanics tests (for Debian/Linux Shell) written in Nodejs",
+  "main": "viewer.js",
+  "scripts": {
+    "engine": "node viewer.js",
+    "image": "node debug-image.js",
+    "whitelist": "node unicode-whitelist-generater.js",
+    "colors": "node color-capability-generator.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "chalk": "^5.6.2",
+    "openai": "^4.56.0",
+    "pngjs": "^7.0.0"
+  }
+}
