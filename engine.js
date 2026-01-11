@@ -467,7 +467,8 @@ try {
         }
     }
 } catch (e) {
-    // ignore and fall back to empty prompts
+    try { console.error('Error reading prompts.json:', e); } catch {}
+    process.exit(1);
 }
 system = String(system || '');
 user = String(user || '');
